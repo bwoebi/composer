@@ -97,13 +97,13 @@ abstract class ArchiveDownloader extends FileDownloader
         $retryLoop = function() use ($package, $path, $reactor, $onDownload) {
             try {
                 $promise = parent::download($package, $path, $reactor);
-                if (reactor) {
+                if ($reactor) {
                     return $promise->when($onDownload);
                 } else {
                     return $onDownload(null, $promise);
                 }
             } catch (\Exception $e) {
-                return $onDownload($e);
+                return $onDownload($e, null);
             }
         };
 

@@ -613,7 +613,7 @@ class Installer
             }
 
             if ($reactor) {
-                \Amp\wait(\Amp\all($promises));
+                \Amp\wait(\Amp\all($promises), $reactor);
             }
 
             foreach ($postOps as $operation) {

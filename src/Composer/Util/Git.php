@@ -78,8 +78,8 @@ class Git
                     $url = $protocol ."://" . $match[1] . "/" . $match[2];
                 }
 
-                $onExecute = function ($error, $result) use ($future, &$messages, $initialClone, &$retryLoop, $i, $url) {
-                    if (!$error || 0 === $result->status) {
+                $onExecute = function ($e, $result) use ($future, &$messages, $initialClone, $retryLoop, $i, $url) {
+                    if (!$e || 0 === $result->status) {
                         $future->succeed();
                     } else {
                         $messages[] = '- ' . $url . "\n" . preg_replace('#^#m', '  ', $result->stderr);
@@ -90,7 +90,7 @@ class Git
                     }
                 };
 
-                $promise = $this->process->execute(call_user_func($commandCallable, $url), $ignoredOutput, $cwd, $reactor);
+                $promise = $this->process->execute($commandCallable($url), $ignoredOutput, $cwd, $reactor);
                 if ($reactor) {
                     $promise->when($onExecute);
                 } else {
@@ -105,20 +105,20 @@ class Git
         // if we have a private github url and the ssh protocol is disabled then we skip it and directly fallback to https
         $bypassSshForGitHub = preg_match('{^git@'.self::getGitHubDomainsRegex($this->config).':(.+?)\.git$}i', $url) && !in_array('ssh', $protocols, true);
 
-        $doSsh = function($error) use ($future, $url) {
+        $cleanup = function() use ($initialClone, $command, $url) {
+            if ($initialClone) {
+                $this->filesystem->removeDirectory($initialClone);
+            }
+            $this->throwException('Failed to execute ' . self::sanitizeUrl($command) . "\n\n" . $this->process->getErrorOutput(), $url);
+        };
+
+        $doSsh = function($error) use ($future, $url, $auth, $cleanup, $reactor) {
             if (!$error) {
                 if ($future) {
                     $future->succeed();
                 }
                 return;
             }
-
-            $cleanup = function() use ($initialClone, $command, $url) {
-                if ($initialClone) {
-                    $this->filesystem->removeDirectory($initialClone);
-                }
-                $this->throwException('Failed to execute ' . self::sanitizeUrl($command) . "\n\n" . $this->process->getErrorOutput(), $url);
-            };
 
             // private github repository without git access, try https with auth
             if (preg_match('{^git@'.self::getGitHubDomainsRegex($this->config).':(.+?)\.git$}i', $url, $match)) {
@@ -135,8 +135,11 @@ class Git
                     $auth = $this->io->getAuthentication($match[1]);
                     $url = 'https://'.rawurlencode($auth['username']) . ':' . rawurlencode($auth['password']) . '@'.$match[1].'/'.$match[2].'.git';
 
-                    $command = call_user_func($commandCallable, $url);
-                    $future->succeed($this->process->execute($command, $ignoredOutput, $cwd));
+                    $commandCallable($url);
+                    $promise = $this->process->execute($command, $ignoredOutput, $cwd, $reactor);
+                    if ($future) {
+                        $future->succeed($promise);
+                    }
                     return;
                 }
             } elseif ( // private non-github repo that failed to authenticate
@@ -170,11 +173,11 @@ class Git
                 if ($auth) {
                     $url = $match[1].rawurlencode($auth['username']).':'.rawurlencode($auth['password']).'@'.$match[2].$match[3];
 
-                    $command = call_user_func($commandCallable, $url);
+                    $command = $commandCallable($url);
                     $promise = $this->process->execute($command, $ignoredOutput, $cwd, $reactor);
                     $success = function($error) use ($match, $cleanup, $storeAuth) {
                         if ($error) {
-                            $cleanUp();
+                            $cleanup();
                             return;
                         }
 
@@ -199,7 +202,7 @@ class Git
         if ($bypassSshForGitHub) {
             $doSsh(1);
         } else {
-            $promise = $this->process->execute(call_user_func($commandCallable, $url), $ignoredOutput, $cwd, $reactor);
+            $promise = $this->process->execute($commandCallable($url), $ignoredOutput, $cwd, $reactor);
             if ($reactor) {
                 $promise->when($doSsh);
             } else {
