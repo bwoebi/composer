@@ -14,6 +14,8 @@ namespace Composer\Downloader;
 
 use Composer\Package\PackageInterface;
 use Symfony\Component\Finder\Finder;
+use Amp\Reactor;
+use Amp\Future;
 
 /**
  * Base downloader for archives
@@ -27,68 +29,85 @@ abstract class ArchiveDownloader extends FileDownloader
     /**
      * {@inheritDoc}
      */
-    public function download(PackageInterface $package, $path)
+    public function download(PackageInterface $package, $path, Reactor $reactor = null)
     {
         $temporaryDir = $this->config->get('vendor-dir').'/composer/'.substr(md5(uniqid('', true)), 0, 8);
-        $retries = 3;
-        while ($retries--) {
-            $fileName = parent::download($package, $path);
 
-            if ($this->io->isVerbose()) {
-                $this->io->writeError('    Extracting archive');
-            }
-
-            try {
-                $this->filesystem->ensureDirectoryExists($temporaryDir);
-                try {
-                    $this->extract($fileName, $temporaryDir);
-                } catch (\Exception $e) {
-                    // remove cache if the file was corrupted
-                    parent::clearCache($package, $path);
-                    throw $e;
-                }
-
-                $this->filesystem->unlink($fileName);
-
-                $contentDir = $this->getFolderContent($temporaryDir);
-
-                // only one dir in the archive, extract its contents out of it
-                if (1 === count($contentDir) && is_dir(reset($contentDir))) {
-                    $contentDir = $this->getFolderContent((string) reset($contentDir));
-                }
-
-                // move files back out of the temp dir
-                foreach ($contentDir as $file) {
-                    $file = (string) $file;
-                    $this->filesystem->rename($file, $path . '/' . basename($file));
-                }
-
-                $this->filesystem->removeDirectory($temporaryDir);
-                if ($this->filesystem->isDirEmpty($this->config->get('vendor-dir').'/composer/')) {
-                    $this->filesystem->removeDirectory($this->config->get('vendor-dir').'/composer/');
-                }
-                if ($this->filesystem->isDirEmpty($this->config->get('vendor-dir'))) {
-                    $this->filesystem->removeDirectory($this->config->get('vendor-dir'));
-                }
-            } catch (\Exception $e) {
+        $future = $reactor ? new Future : null;
+        $onDownload = function($exception, $fileName) use ($temporaryDir, $package, $path, $future, &$retryLoop) {
+            if ($exception) {
                 // clean up
                 $this->filesystem->removeDirectory($path);
                 $this->filesystem->removeDirectory($temporaryDir);
 
                 // retry downloading if we have an invalid zip file
-                if ($retries && $e instanceof \UnexpectedValueException && class_exists('ZipArchive') && $e->getCode() === \ZipArchive::ER_NOZIP) {
+                static $retries = 3;
+                if ($retries-- && $e instanceof \UnexpectedValueException && class_exists('ZipArchive') && $exception->getCode() === \ZipArchive::ER_NOZIP) {
                     $this->io->writeError('    Invalid zip file, retrying...');
                     usleep(500000);
-                    continue;
+                    return $retryLoop();
+                } else {
+                    if ($future) {
+                        return $future->fail($exception);
+                    } else {
+                        throw $exception;
+                    }
                 }
+            }
 
+            if ($this->io->isVerbose()) {
+                $this->io->writeError('    Extracting archive');
+            }
+
+            $this->filesystem->ensureDirectoryExists($temporaryDir);
+            try {
+                $this->extract($fileName, $temporaryDir);
+            } catch (\Exception $e) {
+                // remove cache if the file was corrupted
+                parent::clearCache($package, $path);
                 throw $e;
             }
 
-            break;
-        }
+            $this->filesystem->unlink($fileName);
 
-        $this->io->writeError('');
+            $contentDir = $this->getFolderContent($temporaryDir);
+
+            // only one dir in the archive, extract its contents out of it
+            if (1 === count($contentDir) && is_dir(reset($contentDir))) {
+                $contentDir = $this->getFolderContent((string) reset($contentDir));
+            }
+
+            // move files back out of the temp dir
+            foreach ($contentDir as $file) {
+                $file = (string) $file;
+                $this->filesystem->rename($file, $path . '/' . basename($file));
+            }
+
+            $this->filesystem->removeDirectory($temporaryDir);
+            if ($this->filesystem->isDirEmpty($this->config->get('vendor-dir').'/composer/')) {
+                $this->filesystem->removeDirectory($this->config->get('vendor-dir').'/composer/');
+            }
+            if ($this->filesystem->isDirEmpty($this->config->get('vendor-dir'))) {
+                $this->filesystem->removeDirectory($this->config->get('vendor-dir'));
+            }
+
+            $this->io->writeError('');
+            $future->succeed($fileName);
+        };
+        $retryLoop = function() use ($package, $path, $reactor, $onDownload) {
+            try {
+                $promise = parent::download($package, $path, $reactor);
+                if (reactor) {
+                    return $promise->when($onDownload);
+                } else {
+                    return $onDownload(null, $promise);
+                }
+            } catch (\Exception $e) {
+                return $onDownload($e);
+            }
+        };
+
+        return $retryLoop();
     }
 
     /**

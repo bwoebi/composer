@@ -23,6 +23,7 @@ use Composer\DependencyResolver\Operation\UninstallOperation;
 use Composer\DependencyResolver\Operation\MarkAliasInstalledOperation;
 use Composer\DependencyResolver\Operation\MarkAliasUninstalledOperation;
 use Composer\Util\StreamContextFactory;
+use Amp\Reactor;
 
 /**
  * Package operation manager.
@@ -133,10 +134,10 @@ class InstallationManager
      * @param RepositoryInterface $repo      repository in which to check
      * @param OperationInterface  $operation operation instance
      */
-    public function execute(RepositoryInterface $repo, OperationInterface $operation)
+    public function execute(RepositoryInterface $repo, OperationInterface $operation, Reactor $reactor = null)
     {
         $method = $operation->getJobType();
-        $this->$method($repo, $operation);
+        return $this->$method($repo, $operation, $reactor);
     }
 
     /**
@@ -145,12 +146,14 @@ class InstallationManager
      * @param RepositoryInterface $repo      repository in which to check
      * @param InstallOperation    $operation operation instance
      */
-    public function install(RepositoryInterface $repo, InstallOperation $operation)
+    public function install(RepositoryInterface $repo, InstallOperation $operation, Reactor $reactor = null)
     {
         $package = $operation->getPackage();
         $installer = $this->getInstaller($package->getType());
-        $installer->install($repo, $package);
+        $promise = $installer->install($repo, $package, $reactor);
         $this->markForNotification($package);
+
+        return $promise;
     }
 
     /**
@@ -159,7 +162,7 @@ class InstallationManager
      * @param RepositoryInterface $repo      repository in which to check
      * @param UpdateOperation     $operation operation instance
      */
-    public function update(RepositoryInterface $repo, UpdateOperation $operation)
+    public function update(RepositoryInterface $repo, UpdateOperation $operation, Reactor $reactor = null)
     {
         $initial = $operation->getInitialPackage();
         $target = $operation->getTargetPackage();
@@ -169,12 +172,14 @@ class InstallationManager
 
         if ($initialType === $targetType) {
             $installer = $this->getInstaller($initialType);
-            $installer->update($repo, $initial, $target);
+            $promise = $installer->update($repo, $initial, $target, $reactor);
             $this->markForNotification($target);
         } else {
             $this->getInstaller($initialType)->uninstall($repo, $initial);
-            $this->getInstaller($targetType)->install($repo, $target);
+            $promise = $this->getInstaller($targetType)->install($repo, $target, $reactor);
         }
+
+        return $promise;
     }
 
     /**

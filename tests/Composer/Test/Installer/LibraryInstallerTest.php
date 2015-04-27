@@ -113,7 +113,7 @@ class LibraryInstallerTest extends TestCase
         $this->dm
             ->expects($this->once())
             ->method('download')
-            ->with($package, $this->vendorDir.'/some/package');
+            ->with($package, $this->vendorDir.'/some/package')
 
         $this->repository
             ->expects($this->once())
@@ -169,7 +169,7 @@ class LibraryInstallerTest extends TestCase
         $this->dm
             ->expects($this->once())
             ->method('update')
-            ->with($initial, $target, $this->vendorDir.'/package1/newtarget');
+            ->with($initial, $target, $this->vendorDir.'/package1/newtarget')
 
         $this->repository
             ->expects($this->once())

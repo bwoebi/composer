@@ -16,6 +16,8 @@ use Composer\Composer;
 use Composer\Config;
 use Composer\IO\IOInterface;
 use Composer\Downloader\TransportException;
+use Amp\Reactor;
+use Amp\Artax\Request;
 
 /**
  * @author François Pluchino <francois.pluchino@opendisplay.com>
@@ -63,9 +65,9 @@ class RemoteFilesystem
      *
      * @return bool true
      */
-    public function copy($originUrl, $fileUrl, $fileName, $progress = true, $options = array())
+    public function copy($originUrl, $fileUrl, $fileName, $progress = true, $options = array(), Reactor $reactor = null)
     {
-        return $this->get($originUrl, $fileUrl, $options, $fileName, $progress);
+        return $this->get($originUrl, $fileUrl, $options, $fileName, $progress, $reactor);
     }
 
     /**
@@ -78,9 +80,9 @@ class RemoteFilesystem
      *
      * @return bool|string The content
      */
-    public function getContents($originUrl, $fileUrl, $progress = true, $options = array())
+    public function getContents($originUrl, $fileUrl, $progress = true, $options = array(), Reactor $reactor = null)
     {
-        return $this->get($originUrl, $fileUrl, $options, null, $progress);
+        return $this->get($originUrl, $fileUrl, $options, null, $progress, $reactor);
     }
 
     /**
@@ -117,7 +119,7 @@ class RemoteFilesystem
      *
      * @return bool|string
      */
-    protected function get($originUrl, $fileUrl, $additionalOptions = array(), $fileName = null, $progress = true)
+    protected function get($originUrl, $fileUrl, $additionalOptions = array(), $fileName = null, $progress = true, Reactor $reactor = null)
     {
         if (strpos($originUrl, '.github.com') === (strlen($originUrl) - 11)) {
             $originUrl = 'github.com';
@@ -152,6 +154,27 @@ class RemoteFilesystem
             $fileUrl .= (false === strpos($fileUrl, '?') ? '?' : '&') . 'access_token='.$options['github-token'];
             unset($options['github-token']);
         }
+
+        if (!$reactor) {
+           return $this->syncGet($originUrl, $fileUrl, $options, $fileName, $progress);
+        }
+
+/* TODO: auth..., callbacks etc. */
+        $client = new Artax\Client($reactor);
+        $req = (new Artax\Request)
+            ->setUri($fileUrl);
+        if (isset($options['http']['headers'])) {
+            foreach ($options['http']['headers'] as $header) {
+                list($field, $val) = explode(":", $header);
+                $req->setHeaders($field, ltrim($val));
+            }
+        }
+
+        return $client->request($req);
+    }
+
+    private function syncGet($originUrl, $fileUrl, $options = array(), $fileName = null, $progress = true)
+    {
         if (isset($options['http'])) {
             $options['http']['ignore_errors'] = true;
         }

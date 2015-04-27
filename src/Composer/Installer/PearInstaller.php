@@ -18,6 +18,7 @@ use Composer\Downloader\PearPackageExtractor;
 use Composer\Repository\InstalledRepositoryInterface;
 use Composer\Package\PackageInterface;
 use Composer\Util\ProcessExecutor;
+use Amp\Reactor;
 
 /**
  * Package installation manager.
@@ -42,15 +43,26 @@ class PearInstaller extends LibraryInstaller
     /**
      * {@inheritDoc}
      */
-    public function update(InstalledRepositoryInterface $repo, PackageInterface $initial, PackageInterface $target)
+    public function update(InstalledRepositoryInterface $repo, PackageInterface $initial, PackageInterface $target, Reactor $reactor = null)
     {
         $this->uninstall($repo, $initial);
-        $this->install($repo, $target);
+        return $this->install($repo, $target, $reactor);
     }
 
-    protected function installCode(PackageInterface $package)
+    protected function installCode(PackageInterface $package, Reactor $reactor = null)
     {
-        parent::installCode($package);
+        if ($reactor) {
+            return parent::installCode($package, $reactor)->when(function () use ($package) {
+                $this->postInstall($package);
+            });
+        } else {
+            parent::installCode($package);
+            $this->postInstall($package);
+        }
+    }
+
+    private function postInstall(PackageInterface $package)
+    {
         parent::initializeBinDir();
 
         $isWindows = defined('PHP_WINDOWS_VERSION_BUILD');

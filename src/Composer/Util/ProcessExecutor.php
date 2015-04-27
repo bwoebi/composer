@@ -12,9 +12,11 @@
 
 namespace Composer\Util;
 
-use Symfony\Component\Process\Process;
+use Symfony\Component\Process\Process as OldProc;
 use Symfony\Component\Process\ProcessUtils;
 use Composer\IO\IOInterface;
+use Amp\Reactor;
+use Amp\Process;
 
 /**
  * @author Robert Schönthal <seroscho@googlemail.com>
@@ -41,7 +43,7 @@ class ProcessExecutor
      * @param  string $cwd     the working directory
      * @return int    statuscode
      */
-    public function execute($command, &$output = null, $cwd = null)
+    public function execute($command, &$output = null, $cwd = null, Reactor $reactor = null)
     {
         if ($this->io && $this->io->isDebug()) {
             $safeCommand = preg_replace('{(://[^:/\s]+:)[^@\s/]+}i', '$1****', $command);
@@ -56,18 +58,37 @@ class ProcessExecutor
 
         $this->captureOutput = count(func_get_args()) > 1;
         $this->errorOutput = null;
-        $process = new Process($command, $cwd, null, null, static::getTimeout());
 
         $callback = is_callable($output) ? $output : array($this, 'outputHandler');
-        $process->run($callback);
 
-        if ($this->captureOutput && !is_callable($output)) {
-            $output = $process->getOutput();
+        if ($reactor) {
+            $process = new Process($command, array("cwd" => $cwd), $reactor);
+            $promise = $process->exec($this->captureOutput ? self::BUFFER_ALL : self::BUFFER_STDERR);
+            $timeout = $reactor->once(function() use ($process) {
+                $process->cancel(); // fails the promise
+            }, static::getTimeout());
+            $promise->when(function() use ($timeout, $reactor) {
+                $reactor->cancel($timeout);
+            });
+            $promise->watch(function($msg) use ($callback) {
+                list($type, $data) = $msg;
+                $map = array("out" => OldProc::OUT, "err" => OldProc::ERR);
+                $callback($map[$type], $data);
+            });
+            return $promise;
+        } else {
+            $process = new OldProc($command, $cwd, null, null, static::getTimeout());
+
+            $process->run($callback);
+
+            if ($this->captureOutput && !is_callable($output)) {
+                $output = $process->getOutput();
+            }
+
+            $this->errorOutput = $process->getErrorOutput();
+
+            return $process->getExitCode();
         }
-
-        $this->errorOutput = $process->getErrorOutput();
-
-        return $process->getExitCode();
     }
 
     public function splitLines($output)

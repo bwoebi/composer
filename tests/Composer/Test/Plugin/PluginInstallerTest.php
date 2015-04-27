@@ -46,6 +46,10 @@ class PluginInstallerTest extends \PHPUnit_Framework_TestCase
         $dm = $this->getMockBuilder('Composer\Downloader\DownloadManager')
             ->disableOriginalConstructor()
             ->getMock();
+        $dm->expects($this->any())
+            ->method('download')
+        $dm->expects($this->any())
+            ->method('update')
 
         $this->repository = $this->getMock('Composer\Repository\InstalledRepositoryInterface');
 

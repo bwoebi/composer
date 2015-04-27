@@ -15,6 +15,8 @@ namespace Composer\Downloader;
 use Composer\Package\PackageInterface;
 use Composer\IO\IOInterface;
 use Composer\Util\Filesystem;
+use Amp\Reactor;
+use Amp\Promise;
 
 /**
  * Downloaders manager.
@@ -166,7 +168,7 @@ class DownloadManager
      * @throws \InvalidArgumentException if package have no urls to download from
      * @throws \RuntimeException
      */
-    public function download(PackageInterface $package, $targetDir, $preferSource = null)
+    public function download(PackageInterface $package, $targetDir, $preferSource = null, Reactor $reactor = null)
     {
         $preferSource = null !== $preferSource ? $preferSource : $this->preferSource;
         $sourceType   = $package->getSourceType();
@@ -190,30 +192,55 @@ class DownloadManager
 
         $this->filesystem->ensureDirectoryExists($targetDir);
 
-        foreach ($sources as $i => $source) {
-            if (isset($e)) {
-                $this->io->writeError('    <warning>Now trying to download from ' . $source . '</warning>');
-            }
-            $package->setInstallationSource($source);
-            try {
-                $downloader = $this->getDownloaderForInstalledPackage($package);
-                if ($downloader) {
-                    $downloader->download($package, $targetDir);
-                }
-                break;
-            } catch (\RuntimeException $e) {
-                if ($i === count($sources) - 1) {
+        $future = $reactor ? new Future : null;
+        $retryLoop = function (\Exception $e = null) use ($sources, $package, $targetDir, $reactor, $future, &$retryLoop) {
+            static $i = 0;
+            if (!isset($sources[$i])) {
+                if ($future) {
+                    $future->fail($e);
+                    return;
+                } else {
                     throw $e;
                 }
-
-                $this->io->writeError(
-                    '    <warning>Failed to download '.
-                    $package->getPrettyName().
-                    ' from ' . $source . ': '.
-                    $e->getMessage().'</warning>'
-                );
             }
-        }
+            $source = $sources[$i++];
+            try {
+                if (isset($e)) {
+                    $this->io->writeError(
+                        '    <warning>Failed to download '.
+                        $package->getPrettyName().
+                        ' from ' . $sources[$i - 1] . ': '.
+                        $e->getMessage().'</warning>'
+                    );
+                    $this->io->writeError('    <warning>Now trying to download from ' . $source . '</warning>');
+                }
+                $package->setInstallationSource($source);
+                $downloader = $this->getDownloaderForInstalledPackage($package);
+                $promise = $downloader ? $downloader->download($package, $targetDir, $reactor) : null;
+                if ($promise && $reactor) {
+                    $promise->when(function($e, $result) {
+                        if ($e instanceof \RuntimeException) {
+                            $retryLoop($e);
+                        } elseif ($e) {
+                            $future->fail($e);
+                        } else {
+                            $future->succeed($result);
+                        }
+                    });
+                } else {
+                    if ($future) {
+                        $future->succeed($promise);
+                    } else {
+                        return $promise;
+                   }
+                }
+            } catch (\RuntimeException $e) {
+                $retryLoop($e);
+            }
+        };
+
+        $result = $retryLoop();
+        return $future ?: $result;
     }
 
     /**
@@ -225,38 +252,36 @@ class DownloadManager
      *
      * @throws \InvalidArgumentException if initial package is not installed
      */
-    public function update(PackageInterface $initial, PackageInterface $target, $targetDir)
+    public function update(PackageInterface $initial, PackageInterface $target, $targetDir, Reactor $reactor = null)
     {
         $downloader = $this->getDownloaderForInstalledPackage($initial);
-        if (!$downloader) {
-            return;
+        if ($downloader) {
+            $installationSource = $initial->getInstallationSource();
+
+            if ('dist' === $installationSource) {
+                $initialType = $initial->getDistType();
+                $targetType  = $target->getDistType();
+            } else {
+                $initialType = $initial->getSourceType();
+                $targetType  = $target->getSourceType();
+            }
+
+            // upgrading from a dist stable package to a dev package, force source reinstall
+            if ($target->isDev() && 'dist' === $installationSource) {
+                $downloader->remove($initial, $targetDir);
+                $promise = $this->download($target, $targetDir, $reactor);
+            } elseif ($initialType === $targetType) {
+                $target->setInstallationSource($installationSource);
+                $promise = $downloader->update($initial, $target, $targetDir, $reactor);
+            } else {
+                $downloader->remove($initial, $targetDir);
+                $promise = $this->download($target, $targetDir, 'source' === $installationSource, $reactor);
+            }
+
+            return $promise;
         }
 
-        $installationSource = $initial->getInstallationSource();
-
-        if ('dist' === $installationSource) {
-            $initialType = $initial->getDistType();
-            $targetType  = $target->getDistType();
-        } else {
-            $initialType = $initial->getSourceType();
-            $targetType  = $target->getSourceType();
-        }
-
-        // upgrading from a dist stable package to a dev package, force source reinstall
-        if ($target->isDev() && 'dist' === $installationSource) {
-            $downloader->remove($initial, $targetDir);
-            $this->download($target, $targetDir);
-
-            return;
-        }
-
-        if ($initialType === $targetType) {
-            $target->setInstallationSource($installationSource);
-            $downloader->update($initial, $target, $targetDir);
-        } else {
-            $downloader->remove($initial, $targetDir);
-            $this->download($target, $targetDir, 'source' === $installationSource);
-        }
+        return $reactor ? new Success : null;
     }
 
     /**

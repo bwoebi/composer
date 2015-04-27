@@ -19,6 +19,10 @@ use Composer\Util\ProcessExecutor;
 use Composer\IO\IOInterface;
 use Composer\Util\Filesystem;
 use Composer\Config;
+use Amp\Reactor;
+use Amp\Success;
+
+/* TODO: Port some more process calls to use Promises */
 
 /**
  * @author Jordi Boggiano <j.boggiano@seld.be>
@@ -37,7 +41,7 @@ class GitDownloader extends VcsDownloader
     /**
      * {@inheritDoc}
      */
-    public function doDownload(PackageInterface $package, $path, $url)
+    public function doDownload(PackageInterface $package, $path, $url, Reactor $reactor = null)
     {
         GitUtil::cleanEnv();
         $path = $this->normalizePath($path);
@@ -51,19 +55,57 @@ class GitDownloader extends VcsDownloader
             return sprintf($command, ProcessExecutor::escape($url), ProcessExecutor::escape($path), ProcessExecutor::escape($ref));
         };
 
-        $this->gitUtil->runCommand($commandCallable, $url, $path, true);
-        if ($url !== $package->getSourceUrl()) {
-            $url = $package->getSourceUrl();
-            $this->process->execute(sprintf('git remote set-url origin %s', ProcessExecutor::escape($url)), $output, $path);
-        }
-        $this->setPushUrl($path, $url);
-
-        if ($newRef = $this->updateToCommit($path, $ref, $package->getPrettyVersion(), $package->getReleaseDate())) {
-            if ($package->getDistReference() === $package->getSourceReference()) {
-                $package->setDistReference($newRef);
+        $success = function($e) use ($url, $package, $path, $ref, $reactor) {
+            if ($e) {
+                return;
             }
-            $package->setSourceReference($newRef);
+
+            $finalize = function($e) {
+                if ($e) {
+                    return;
+                }
+
+                if ($newRef = $this->updateToCommit($path, $ref, $package->getPrettyVersion(), $package->getReleaseDate(), $reactor)) {
+                    if ($package->getDistReference() === $package->getSourceReference()) {
+                        $package->setDistReference($newRef);
+                    }
+                    $package->setSourceReference($newRef);
+                }
+            };
+
+            $push = function($e) use ($finalize, $reactor) {
+                if ($e) {
+                    return;
+                }
+                $promise = $this->setPushUrl($path, $url, $reactor);
+                if ($reactor) {
+                    $promise->when($finalize);
+                } else {
+                    $finalize();
+                }
+            };
+
+            if ($url !== $package->getSourceUrl()) {
+                $url = $package->getSourceUrl();
+                $promise = $this->process->execute(sprintf('git remote set-url origin %s', ProcessExecutor::escape($url)), $output, $path, $reactor);
+                if ($reactor) {
+                    $promise->when($push);
+                } else {
+                    $push();
+                }
+            } else {
+                $push();
+            }
+        };
+
+        $promise = $this->gitUtil->runCommand($commandCallable, $url, $path, true, $reactor);
+        if ($reactor) {
+            $promise->when($success);
+        } else {
+            $success();
         }
+
+        return $promise;
     }
 
     /**
@@ -213,7 +255,7 @@ class GitDownloader extends VcsDownloader
      *
      * @throws \RuntimeException
      */
-    protected function updateToCommit($path, $reference, $branch, $date)
+    protected function updateToCommit($path, $reference, $branch, $date, Reactor $reactor = null)
     {
         // This uses the "--" sequence to separate branch from file parameters.
         //
@@ -272,7 +314,7 @@ class GitDownloader extends VcsDownloader
         throw new \RuntimeException('Failed to execute ' . GitUtil::sanitizeUrl($command) . "\n\n" . $this->process->getErrorOutput());
     }
 
-    protected function setPushUrl($path, $url)
+    protected function setPushUrl($path, $url, Reactor $reactor = null)
     {
         // set push url for github projects
         if (preg_match('{^(?:https?|git)://'.GitUtil::getGitHubDomainsRegex($this->config).'/([^/]+)/([^/]+?)(?:\.git)?$}', $url, $match)) {
@@ -282,7 +324,10 @@ class GitDownloader extends VcsDownloader
                 $pushUrl = 'https://' . $match[1] . '/'.$match[2].'/'.$match[3].'.git';
             }
             $cmd = sprintf('git remote set-url --push origin %s', ProcessExecutor::escape($pushUrl));
-            $this->process->execute($cmd, $ignoredOutput, $path);
+            return $this->process->execute($cmd, $ignoredOutput, $path, $reactor);
+        }
+        if ($reactor) {
+            return new Success;
         }
     }
 

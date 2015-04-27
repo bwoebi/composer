@@ -18,6 +18,11 @@ use Composer\Package\Version\VersionParser;
 use Composer\Util\ProcessExecutor;
 use Composer\IO\IOInterface;
 use Composer\Util\Filesystem;
+use Amp\Reactor;
+use Amp\Future;
+use Amp\Success;
+
+/* TODO: Add more promisy stuff */
 
 /**
  * @author Jordi Boggiano <j.boggiano@seld.be>
@@ -48,7 +53,7 @@ abstract class VcsDownloader implements DownloaderInterface, ChangeReportInterfa
     /**
      * {@inheritDoc}
      */
-    public function download(PackageInterface $package, $path)
+    public function download(PackageInterface $package, $path, Reactor $reactor = null)
     {
         if (!$package->getSourceReference()) {
             throw new \InvalidArgumentException('Package '.$package->getPrettyName().' is missing reference information');
@@ -58,32 +63,59 @@ abstract class VcsDownloader implements DownloaderInterface, ChangeReportInterfa
         $this->filesystem->emptyDirectory($path);
 
         $urls = $package->getSourceUrls();
-        while ($url = array_shift($urls)) {
-            try {
-                if (Filesystem::isLocalPath($url)) {
-                    $url = realpath($url);
-                }
-                $this->doDownload($package, $path, $url);
-                break;
-            } catch (\Exception $e) {
-                if ($this->io->isDebug()) {
-                    $this->io->writeError('Failed: ['.get_class($e).'] '.$e->getMessage());
-                } elseif (count($urls)) {
-                    $this->io->writeError('    Failed, trying the next URL');
-                }
-                if (!count($urls)) {
-                    throw $e;
-                }
-            }
-        }
 
-        $this->io->writeError('');
+        $future = $reactor ? new Future : null;
+
+        $retryLoop = function () use ($package, $path, &$urls, $reactor, $future, &$retryLoop) {
+            $url = array_shift($urls);
+
+            if (Filesystem::isLocalPath($url)) {
+                $url = realpath($url);
+            }
+
+            $onDownload = function ($e, $result) use ($future, $retryLoop, $urls) {
+                if (isset($e)) {
+                    if ($this->io->isDebug()) {
+                        $this->io->writeError('Failed: ['.get_class($e).'] '.$e->getMessage());
+                    } elseif ($urls) {
+                        $this->io->writeError('    Failed, trying the next URL');
+                    }
+                }
+                if (!$urls) {
+                    if ($future) {
+                        $future->fail($e);
+                        return;
+                    } else {
+                        throw $e;
+                    }
+                } else {
+                    $retryLoop();
+                }
+
+                $this->io->writeError('');
+                $future->succeed($result);
+            };
+
+            try {
+                $promise = $this->doDownload($package, $path, $url, $reactor);
+                if ($reactor) {
+                    $promise->when($onDownload);
+                } else {
+                    $onDownload(null, $promise);
+                }
+            } catch (\Exception $e) {
+                $onDownload($e);
+            }
+        };
+
+        $retryLoop();
+        return $future;
     }
 
     /**
      * {@inheritDoc}
      */
-    public function update(PackageInterface $initial, PackageInterface $target, $path)
+    public function update(PackageInterface $initial, PackageInterface $target, $path, Reactor $reactor = null)
     {
         if (!$target->getSourceReference()) {
             throw new \InvalidArgumentException('Package '.$target->getPrettyName().' is missing reference information');
@@ -152,6 +184,8 @@ abstract class VcsDownloader implements DownloaderInterface, ChangeReportInterfa
         }
 
         $this->io->writeError('');
+
+        return new Success;
     }
 
     /**

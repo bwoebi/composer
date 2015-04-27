@@ -17,6 +17,7 @@ use Composer\Package\Package;
 use Composer\IO\IOInterface;
 use Composer\Repository\InstalledRepositoryInterface;
 use Composer\Package\PackageInterface;
+use Amp\Reactor;
 
 /**
  * Installer for plugin packages
@@ -26,7 +27,6 @@ use Composer\Package\PackageInterface;
  */
 class PluginInstaller extends LibraryInstaller
 {
-    private $installationManager;
     private static $classCounter = 0;
 
     /**
@@ -34,12 +34,10 @@ class PluginInstaller extends LibraryInstaller
      *
      * @param IOInterface $io
      * @param Composer    $composer
-     * @param string      $type
      */
-    public function __construct(IOInterface $io, Composer $composer, $type = 'library')
+    public function __construct(IOInterface $io, Composer $composer)
     {
         parent::__construct($io, $composer, 'composer-plugin');
-        $this->installationManager = $composer->getInstallationManager();
     }
 
     /**
@@ -53,28 +51,40 @@ class PluginInstaller extends LibraryInstaller
     /**
      * {@inheritDoc}
      */
-    public function install(InstalledRepositoryInterface $repo, PackageInterface $package)
+    public function install(InstalledRepositoryInterface $repo, PackageInterface $package, Reactor $reactor = null)
     {
         $extra = $package->getExtra();
         if (empty($extra['class'])) {
             throw new \UnexpectedValueException('Error while installing '.$package->getPrettyName().', composer-plugin packages should have a class defined in their extra key to be usable.');
         }
 
-        parent::install($repo, $package);
-        $this->composer->getPluginManager()->registerPackage($package, true);
+        if ($reactor) {
+            return parent::install($repo, $package, $reactor)->when(function () use ($package) {
+                $this->composer->getPluginManager()->registerPackage($package, true);
+            });
+        } else {
+            parent::install($repo, $package);
+            $this->composer->getPluginManager()->registerPackage($package, true);
+        }
     }
 
     /**
      * {@inheritDoc}
      */
-    public function update(InstalledRepositoryInterface $repo, PackageInterface $initial, PackageInterface $target)
+    public function update(InstalledRepositoryInterface $repo, PackageInterface $initial, PackageInterface $target, Reactor $reactor = null)
     {
         $extra = $target->getExtra();
         if (empty($extra['class'])) {
             throw new \UnexpectedValueException('Error while installing '.$target->getPrettyName().', composer-plugin packages should have a class defined in their extra key to be usable.');
         }
 
-        parent::update($repo, $initial, $target);
-        $this->composer->getPluginManager()->registerPackage($target, true);
+        if ($reactor) {
+            return parent::update($repo, $initial, $target, $reactor)->when(function () use ($target) {
+                $this->composer->getPluginManager()->registerPackage($target, true);
+            });
+        } else {
+            parent::update($repo, $initial, $target);
+            $this->composer->getPluginManager()->registerPackage($target, true);
+        }
     }
 }

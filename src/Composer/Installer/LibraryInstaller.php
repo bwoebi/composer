@@ -18,6 +18,7 @@ use Composer\Repository\InstalledRepositoryInterface;
 use Composer\Package\PackageInterface;
 use Composer\Util\Filesystem;
 use Composer\Util\ProcessExecutor;
+use Amp\Reactor;
 
 /**
  * Package installation manager.
@@ -74,7 +75,7 @@ class LibraryInstaller implements InstallerInterface
     /**
      * {@inheritDoc}
      */
-    public function install(InstalledRepositoryInterface $repo, PackageInterface $package)
+    public function install(InstalledRepositoryInterface $repo, PackageInterface $package, Reactor $reactor = null)
     {
         $this->initializeVendorDir();
         $downloadPath = $this->getInstallPath($package);
@@ -84,7 +85,20 @@ class LibraryInstaller implements InstallerInterface
             $this->removeBinaries($package);
         }
 
-        $this->installCode($package);
+        if ($reactor) {
+            return $this->installCode($package, $reactor)->when(function ($error) use ($repo, $package) {
+                if (!$error) {
+                    $this->postInstall($repo, $package);
+                }
+            });
+        } else {
+            $this->installCode($package, $reactor);
+            $this->postInstall($repo, $package);
+        }
+    }
+
+    private function postInstall(InstalledRepositoryInterface $repo, PackageInterface $package)
+    {
         $this->installBinaries($package);
         if (!$repo->hasPackage($package)) {
             $repo->addPackage(clone $package);
@@ -94,7 +108,7 @@ class LibraryInstaller implements InstallerInterface
     /**
      * {@inheritDoc}
      */
-    public function update(InstalledRepositoryInterface $repo, PackageInterface $initial, PackageInterface $target)
+    public function update(InstalledRepositoryInterface $repo, PackageInterface $initial, PackageInterface $target, Reactor $reactor = null)
     {
         if (!$repo->hasPackage($initial)) {
             throw new \InvalidArgumentException('Package is not installed: '.$initial);
@@ -103,7 +117,21 @@ class LibraryInstaller implements InstallerInterface
         $this->initializeVendorDir();
 
         $this->removeBinaries($initial);
-        $this->updateCode($initial, $target);
+
+        if ($reactor) {
+            return $this->updateCode($initial, $target, $reactor)->when(function ($error) use ($repo, $initial, $target) {
+                if (!$error) {
+                    $this->postUpdate($repo, $initial, $target);
+                }
+            });
+        } else {
+            $this->updateCode($initial, $target);
+            $this->postUpdate($repo, $initial, $target);
+        }
+    }
+
+    private function postUpdate(InstalledRepositoryInterface $repo, PackageInterface $initial, PackageInterface $target)
+    {
         $this->installBinaries($target);
         $repo->removePackage($initial);
         if (!$repo->hasPackage($target)) {
@@ -150,13 +178,13 @@ class LibraryInstaller implements InstallerInterface
         return ($this->vendorDir ? $this->vendorDir.'/' : '') . $package->getPrettyName();
     }
 
-    protected function installCode(PackageInterface $package)
+    protected function installCode(PackageInterface $package, Reactor $reactor = null)
     {
         $downloadPath = $this->getInstallPath($package);
-        $this->downloadManager->download($package, $downloadPath);
+        return $this->downloadManager->download($package, $downloadPath, null, $reactor);
     }
 
-    protected function updateCode(PackageInterface $initial, PackageInterface $target)
+    protected function updateCode(PackageInterface $initial, PackageInterface $target, Reactor $reactor = null)
     {
         $initialDownloadPath = $this->getInstallPath($initial);
         $targetDownloadPath = $this->getInstallPath($target);
@@ -167,14 +195,12 @@ class LibraryInstaller implements InstallerInterface
                 || substr($targetDownloadPath, 0, strlen($initialDownloadPath)) === $initialDownloadPath
             ) {
                 $this->removeCode($initial);
-                $this->installCode($target);
-
-                return;
+                return $this->installCode($target, $reactor);
             }
 
             $this->filesystem->rename($initialDownloadPath, $targetDownloadPath);
         }
-        $this->downloadManager->update($initial, $target, $targetDownloadPath);
+        return $this->downloadManager->update($initial, $target, $targetDownloadPath, $reactor);
     }
 
     protected function removeCode(PackageInterface $package)

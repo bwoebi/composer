@@ -517,90 +517,112 @@ class Installer
             $this->io->writeError('Nothing to install or update');
         }
 
-        $operations = $this->movePluginsToFront($operations);
-        $operations = $this->moveUninstallsToFront($operations);
+        $opsGroups = array(
+            $this->extractUninstalls($operations),
+            $this->extractPlugins($operations),
+            $operations,
+        );
 
-        foreach ($operations as $operation) {
-            // collect suggestions
-            if ('install' === $operation->getJobType()) {
-                foreach ($operation->getPackage()->getSuggests() as $target => $reason) {
-                    $this->suggestedPackages[] = array(
-                        'source' => $operation->getPackage()->getPrettyName(),
-                        'target' => $target,
-                        'reason' => $reason,
-                    );
-                }
-            }
+        $operations = call_user_func_array('array_merge', $opsGroups);
 
-            // not installing from lock, force dev packages' references if they're in root package refs
-            if (!$installFromLock) {
-                $package = null;
-                if ('update' === $operation->getJobType()) {
-                    $package = $operation->getTargetPackage();
-                } elseif ('install' === $operation->getJobType()) {
-                    $package = $operation->getPackage();
-                }
-                if ($package && $package->isDev()) {
-                    $references = $this->package->getReferences();
-                    if (isset($references[$package->getName()])) {
-                        $package->setSourceReference($references[$package->getName()]);
-                        $package->setDistReference($references[$package->getName()]);
+        if (version_compare(PHP_VERSION, '5.4.0') >= 0 && (DIRECTORY_SEPARATOR != '\\' || version_compare(PHP_VERSION, '5.5.18') >= 0)) {
+            $reactor = \Amp\getReactor();
+            $promises = [];
+	} else {
+            $reactor = null;
+        }
+
+        foreach ($opsGroups as $ops) {
+            $postOps = array();
+
+            foreach ($ops as $operation) {
+                // collect suggestions
+                if ('install' === $operation->getJobType()) {
+                    foreach ($operation->getPackage()->getSuggests() as $target => $reason) {
+                        $this->suggestedPackages[] = array(
+                            'source' => $operation->getPackage()->getPrettyName(),
+                            'target' => $target,
+                            'reason' => $reason,
+                        );
                     }
                 }
-                if ('update' === $operation->getJobType()
-                    && $operation->getTargetPackage()->isDev()
-                    && $operation->getTargetPackage()->getVersion() === $operation->getInitialPackage()->getVersion()
-                    && $operation->getTargetPackage()->getSourceReference() === $operation->getInitialPackage()->getSourceReference()
-                ) {
-                    if ($this->io->isDebug()) {
-                        $this->io->writeError('  - Skipping update of '. $operation->getTargetPackage()->getPrettyName().' to the same reference-locked version');
-                        $this->io->writeError('');
+
+                // not installing from lock, force dev packages' references if they're in root package refs
+                if (!$installFromLock) {
+                    $package = null;
+                    if ('update' === $operation->getJobType()) {
+                        $package = $operation->getTargetPackage();
+                    } elseif ('install' === $operation->getJobType()) {
+                        $package = $operation->getPackage();
                     }
-
-                    continue;
-                }
-            }
-
-            $event = 'Composer\Installer\PackageEvents::PRE_PACKAGE_'.strtoupper($operation->getJobType());
-            if (defined($event) && $this->runScripts) {
-                $this->eventDispatcher->dispatchPackageEvent(constant($event), $this->devMode, $policy, $pool, $installedRepo, $request, $operations, $operation);
-            }
-
-            // output non-alias ops in dry run, output alias ops in debug verbosity
-            if ($this->dryRun && false === strpos($operation->getJobType(), 'Alias')) {
-                $this->io->writeError('  - ' . $operation);
-                $this->io->writeError('');
-            } elseif ($this->io->isDebug() && false !== strpos($operation->getJobType(), 'Alias')) {
-                $this->io->writeError('  - ' . $operation);
-                $this->io->writeError('');
-            }
-
-            $this->installationManager->execute($localRepo, $operation);
-
-            // output reasons why the operation was ran, only for install/update operations
-            if ($this->verbose && $this->io->isVeryVerbose() && in_array($operation->getJobType(), array('install', 'update'))) {
-                $reason = $operation->getReason();
-                if ($reason instanceof Rule) {
-                    switch ($reason->getReason()) {
-                        case Rule::RULE_JOB_INSTALL:
-                            $this->io->writeError('    REASON: Required by root: '.$reason->getPrettyString($pool));
+                    if ($package && $package->isDev()) {
+                        $references = $this->package->getReferences();
+                        if (isset($references[$package->getName()])) {
+                            $package->setSourceReference($references[$package->getName()]);
+                            $package->setDistReference($references[$package->getName()]);
+                        }
+                    }
+                    if ('update' === $operation->getJobType()
+                        && $operation->getTargetPackage()->isDev()
+                        && $operation->getTargetPackage()->getVersion() === $operation->getInitialPackage()->getVersion()
+                        && $operation->getTargetPackage()->getSourceReference() === $operation->getInitialPackage()->getSourceReference()
+                    ) {
+                        if ($this->io->isDebug()) {
+                            $this->io->writeError('  - Skipping update of '. $operation->getTargetPackage()->getPrettyName().' to the same reference-locked version');
                             $this->io->writeError('');
-                            break;
-                        case Rule::RULE_PACKAGE_REQUIRES:
-                            $this->io->writeError('    REASON: '.$reason->getPrettyString($pool));
-                            $this->io->writeError('');
-                            break;
+                        }
+
+                        continue;
                     }
+                }
+
+                $event = 'Composer\Installer\PackageEvents::PRE_PACKAGE_'.strtoupper($operation->getJobType());
+                if (defined($event) && $this->runScripts) {
+                    $this->eventDispatcher->dispatchPackageEvent(constant($event), $this->devMode, $policy, $pool, $installedRepo, $request, $operations, $operation);
+                }
+
+                // output non-alias ops in dry run, output alias ops in debug verbosity
+                if (false === strpos($operation->getJobType(), 'Alias') ? $this->dryRun : $this->io->isDebug()) {
+                    $this->io->writeError('  - ' . $operation);
+                    $this->io->writeError('');
+                }
+
+                $promises[] = $this->installationManager->execute($localRepo, $operation, $reactor);
+
+                // output reasons why the operation was ran, only for install/update operations
+                if ($this->verbose && $this->io->isVeryVerbose() && in_array($operation->getJobType(), array('install', 'update'))) {
+                    $reason = $operation->getReason();
+                    if ($reason instanceof Rule) {
+                        switch ($reason->getReason()) {
+                            case Rule::RULE_JOB_INSTALL:
+                                $this->io->writeError('    REASON: Required by root: '.$reason->getPrettyString($pool));
+                                $this->io->writeError('');
+                                break;
+                            case Rule::RULE_PACKAGE_REQUIRES:
+                                $this->io->writeError('    REASON: '.$reason->getPrettyString($pool));
+                                $this->io->writeError('');
+                                break;
+                        }
+                    }
+                }
+
+                $event = 'Composer\Installer\PackageEvents::POST_PACKAGE_'.strtoupper($operation->getJobType());
+                if (defined($event) && $this->runScripts) {
+                    $postEvents[] = $operation;
                 }
             }
 
-            $event = 'Composer\Installer\PackageEvents::POST_PACKAGE_'.strtoupper($operation->getJobType());
-            if (defined($event) && $this->runScripts) {
-                $this->eventDispatcher->dispatchPackageEvent(constant($event), $this->devMode, $policy, $pool, $installedRepo, $request, $operations, $operation);
+            if ($reactor) {
+                \Amp\wait(\Amp\all($promises));
             }
 
-            if (!$this->dryRun) {
-                $localRepo->write();
+            foreach ($postOps as $operation) {
+                $event = 'Composer\Installer\PackageEvents::POST_PACKAGE_'.strtoupper($operation->getJobType());
+                $this->eventDispatcher->dispatchPackageEvent(constant($event), $this->devMode, $policy, $pool, $installedRepo, $request, $operations, $operation);
+
+                if (!$this->dryRun) {
+                    $localRepo->write();
+                }
             }
         }
 
@@ -620,7 +642,7 @@ class Installer
      * @param  OperationInterface[] $operations
      * @return OperationInterface[] reordered operation list
      */
-    private function movePluginsToFront(array $operations)
+    private function extractPlugins(array &$operations)
     {
         $installerOps = array();
         foreach ($operations as $idx => $op) {
@@ -648,7 +670,7 @@ class Installer
             }
         }
 
-        return array_merge($installerOps, $operations);
+        return $installerOps;
     }
 
     /**
@@ -658,7 +680,7 @@ class Installer
      * @param  OperationInterface[] $operations
      * @return OperationInterface[] reordered operation list
      */
-    private function moveUninstallsToFront(array $operations)
+    private function extractUninstalls(array &$operations)
     {
         $uninstOps = array();
         foreach ($operations as $idx => $op) {
@@ -668,7 +690,7 @@ class Installer
             }
         }
 
-        return array_merge($uninstOps, $operations);
+        return $uninstOps;
     }
 
     private function createPool($withDevReqs, RepositoryInterface $lockedRepository = null)
